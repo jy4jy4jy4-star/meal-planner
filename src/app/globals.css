@@ -185,4 +185,8 @@ header p { font-size: 13px; color: #888; margin-top: 2px; }
 .tag-badge.protein { background: #d1fae5; color: #065f46; }
 .recipe-filters { background: #fff; border: 1px solid #e8e8e4; border-radius: 10px; padding: 10px 14px; margin-bottom: 12px; display: flex; flex-direction: column; gap: 8px; }
 .filter-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.filter-row-label { font-size: 11px; color: #888; font-weight: 600; min-width: 52px; flex-shrink: 0; }
+.filter-row-label { font-size: 11px; color: #888; font-weight: 600; min-width: 52px; flex-shrink: 0; }.recipe-card .rc-img { width: 100%; height: 120px; object-fit: cover; border-radius: 6px; margin-bottom: 8px; display: block; }
+.recipe-card .rc-img-placeholder { width: 100%; height: 48px; background: #f5f5f0; border-radius: 6px; margin-bottom: 8px; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #ccc; cursor: pointer; border: 1px dashed #ddd; }
+.recipe-card .rc-img-placeholder:hover { background: #eeeee9; border-color: #aaa; color: #888; }
+.rd-img { width: 100%; max-height: 200px; object-fit: cover; border-radius: 8px; margin-bottom: 1rem; display: block; }
+.recipe-card { overflow: hidden; }
