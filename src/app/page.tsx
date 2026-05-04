@@ -24,6 +24,69 @@ const DEFAULT_RECIPES: Recipe[] = [
   { id: 6, name: 'ほうれん草のおひたし', type: 'normal', servings: 2, time: '10分', mode: '', ingredients: ['ほうれん草 1束', '醤油 大さじ1', 'だし 大さじ2', 'かつお節 適量'], steps: ['ほうれん草を塩茹でし、水にさらして水気を絞る。', '食べやすい長さに切り、醤油とだしを混ぜたたれで和える。', '器に盛り、かつお節をのせて完成。'] },
 ]
 
+function toDateKey(date: Date): string {
+  return date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0') + '-' + String(date.getDate()).padStart(2, '0')
+}
+function addDays(date: Date, n: number): Date {
+  const d = new Date(date); d.setDate(d.getDate() + n); return d
+}
+function fromInputValue(str: string): Date {
+  const [y, m, d] = str.split('-').map(Number); return new Date(y, m - 1, d)
+}
+function getDayLabel(date: Date): string {
+  const dow = ['日', '月', '火', '水', '木', '金', '土'][date.getDay()]
+  return dow + ' ' + (date.getMonth() + 1) + '/' + date.getDate()
+}
+function parseAmount(str: string): { value: number; unit: string } | null {
+  const m = str.match(/^([\d./]+)\s*([^\d\s].*)$/)
+  if (m) {
+    let val: number
+    if (m[1].includes('/')) { const p = m[1].split('/'); val = parseFloat(p[0]) / parseFloat(p[1]) }
+    else val = parseFloat(m[1])
+    return { value: val, unit: m[2].trim() }
+  }
+  return null
+}
+function scaleIngredient(ingStr: string, baseServings: number, persons: number): string {
+  const ratio = persons / baseServings
+  if (ratio === 1) return ingStr
+  const spaceIdx = ingStr.indexOf(' ')
+  if (spaceIdx === -1) return ingStr
+  const name = ingStr.slice(0, spaceIdx)
+  const amountStr = ingStr.slice(spaceIdx + 1).trim()
+  const parsed = parseAmount(amountStr)
+  if (!parsed) return ingStr
+  const scaled = parsed.value * ratio
+  const scaledStr = Number.isInteger(scaled) ? String(scaled) : (Math.round(scaled * 10) / 10).toString()
+  return `${name} ${scaledStr}${parsed.unit}`
+}
+function categorize(name: string): string {
+  for (const [k, v] of Object.entries(CMAP)) { if (name.includes(k)) return v }
+  return 'その他'
+}
+function guessTagsTS(recipe: any) {
+  const allText = (recipe.name || '') + ' ' + (recipe.mode || '') + ' ' + (recipe.ingredients || []).join(' ')
+  let course = '主菜'
+  if (/汁|スープ|みそ汁|味噌汁|ポタージュ|豚汁|けんちん/.test(allText)) course = '汁物'
+  else if (/サラダ|おひたし|和え|漬け|きんぴら|酢の物|ナムル|小鉢/.test(allText)) course = '副菜'
+  let cuisine = '和'
+  if (/オリーブ|バター|チーズ|ワイン|クリーム|トマト|パスタ|ロースト|グラタン/.test(allText)) cuisine = '洋'
+  if (/豆板醤|オイスター|ごま油|中華|チンジャオ|餃子|八宝菜|麻婆/.test(allText)) cuisine = '中'
+  if (/醤油|みりん|だし|味噌|おひたし|煮物|照り焼き|唐揚/.test(allText)) cuisine = '和'
+  let method = '他'
+  if (/焼く|焼き|ロースト|グリル|ソテー|炒め/.test(allText) || /焼/.test(recipe.mode || '')) method = '焼'
+  if (/煮る|煮物|煮込み|シチュー|スープ|汁/.test(allText) || /煮/.test(recipe.mode || '')) method = '煮'
+  if (/蒸す|蒸し/.test(allText) || /蒸/.test(recipe.mode || '')) method = '蒸'
+  if (/揚げ|フライ|天ぷら|から揚げ|唐揚/.test(allText)) method = '揚'
+  let protein = '他'
+  if (/豚|ポーク|ばら|ロース/.test(allText)) protein = '豚'
+  if (/鶏|チキン|ささみ|から揚げ|唐揚/.test(allText)) protein = '鶏'
+  if (/牛|ビーフ/.test(allText)) protein = '牛'
+  if (/合いびき|ひき肉|ミンチ|ハンバーグ/.test(allText)) protein = '挽'
+  if (/サバ|鮭|たら|ぶり|あじ|まぐろ|えび|いか|魚|ツナ/.test(allText)) protein = '魚'
+  return { course, cuisine, method, protein }
+}
+
 export default function Home() {
   const initialized = useRef(false)
   const nextIdRef = useRef(7)
@@ -48,10 +111,19 @@ export default function Home() {
         fetch('/api/mealplan').then(r => r.json()).catch(() => ({})),
       ])
       const loadedRecipes: Recipe[] = recipesRes.length > 0 ? recipesRes : DEFAULT_RECIPES
-      if (loadedRecipes.length > 0) nextIdRef.current = Math.max(...loadedRecipes.map((r: Recipe) => r.id)) + 1
+
+      let needsSave = false
+      const migratedRecipes = loadedRecipes.map((r: any) => {
+        if (!r.tags || !r.tags.course) { r.tags = guessTagsTS(r); needsSave = true }
+        return r
+      })
+      if (needsSave) {
+        fetch('/api/recipes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(migratedRecipes) }).catch(() => {})
+      }
+      if (migratedRecipes.length > 0) nextIdRef.current = Math.max(...migratedRecipes.map((r: Recipe) => r.id)) + 1
       ;(window as any).saveDataFn = saveData
       ;(window as any).nextIdRef = nextIdRef
-      injectApp(loadedRecipes, mealPlanRes, CMAP)
+      injectApp(migratedRecipes, mealPlanRes, CMAP)
     }
     init()
   }, [saveData])
@@ -145,6 +217,7 @@ export default function Home() {
         </div>
         <div class="cook-section">
           <div class="cook-section-title">進捗</div>
+          <div id="cd-recipe-img-box"></div>
           <div class="cook-progress-box">
             <div class="cook-progress-num" id="cd-progress-num">0/0</div>
             <div class="cook-progress-label" id="cd-progress-label">手順をタップしてチェック</div>
@@ -184,7 +257,7 @@ export default function Home() {
         </div>
         <div class="claude-format-box">
           <div class="claude-format-title">JSONフォーマット（参考）</div>
-          <pre class="claude-format-code">{"name":"レシピ名","type":"healsio or normal","servings":2,"time":"30分","mode":"まかせて調理 > 焼く","ingredients":["食材 分量"],"steps":["手順1","手順2"]}</pre>
+          <pre class="claude-format-code">{"name":"レシピ名","type":"healsio or normal","servings":2,"time":"30分","mode":"まかせて調理 > 焼く","tags":{"course":"主菜","cuisine":"和","method":"焼","protein":"鶏"},"ingredients":["食材 分量"],"steps":["手順1","手順2"]}</pre>
           <button class="btn-secondary btn-sm" onclick="copyFormat()">フォーマットをコピー</button>
           <span id="copy-msg" style="font-size:11px;color:#166534;margin-left:8px;display:none;">コピーしました</span>
         </div>
@@ -194,6 +267,12 @@ export default function Home() {
           <input class="inp" type="text" placeholder="レシピ名 *" id="m-name">
           <select class="inp-sm" id="m-type"><option value="healsio">ヘルシオ</option><option value="normal">通常</option></select>
           <select class="inp-sm" id="m-servings"><option value="1">1人分基準</option><option value="2" selected>2人分基準</option><option value="3">3人分基準</option><option value="4">4人分基準</option></select>
+        </div>
+        <div class="input-row">
+          <select class="inp-sm" id="m-course"><option value="">種別</option><option>主菜</option><option>副菜</option><option>汁物</option></select>
+          <select class="inp-sm" id="m-cuisine"><option value="">系統</option><option>和</option><option>洋</option><option>中</option><option>他</option></select>
+          <select class="inp-sm" id="m-method"><option value="">調理法</option><option>焼</option><option>煮</option><option>蒸</option><option>揚</option><option>他</option></select>
+          <select class="inp-sm" id="m-protein"><option value="">主食材</option><option>豚</option><option>鶏</option><option>牛</option><option>挽</option><option>魚</option><option>他</option></select>
         </div>
         <div class="input-row">
           <input class="inp" type="text" placeholder="材料（カンマ区切り）例: 鶏もも肉 300g, 塩 小さじ1/2" id="m-ingredients">
@@ -206,30 +285,146 @@ export default function Home() {
     </div>
     <div class="recipes-topbar">
       <span style="font-size:12px;color:#888;" id="recipe-count"></span>
-      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-        <div class="filter-tabs">
-          <button class="filter-tab active" onclick="setRecipeFilter('all',this)">すべて</button>
-          <button class="filter-tab" onclick="setRecipeFilter('healsio',this)">ヘルシオ</button>
-          <button class="filter-tab" onclick="setRecipeFilter('normal',this)">通常</button>
+      <button class="btn-secondary btn-sm" onclick="exportRecipes()">JSONエクスポート</button>
+    </div>
+    <div class="recipe-filters">
+      <div class="filter-row">
+        <span class="filter-row-label">種別</span>
+        <div class="filter-tabs" id="ft-type">
+          <button class="filter-tab active" onclick="setTagFilter('type','all',this)">すべて</button>
+          <button class="filter-tab" onclick="setTagFilter('type','healsio',this)">ヘルシオ</button>
+          <button class="filter-tab" onclick="setTagFilter('type','normal',this)">通常</button>
         </div>
-        <button class="btn-secondary btn-sm" onclick="exportRecipes()">JSONエクスポート</button>
+      </div>
+      <div class="filter-row">
+        <span class="filter-row-label">料理種別</span>
+        <div class="filter-tabs" id="ft-course">
+          <button class="filter-tab active" onclick="setTagFilter('course','all',this)">すべて</button>
+          <button class="filter-tab" onclick="setTagFilter('course','主菜',this)">主菜</button>
+          <button class="filter-tab" onclick="setTagFilter('course','副菜',this)">副菜</button>
+          <button class="filter-tab" onclick="setTagFilter('course','汁物',this)">汁物</button>
+        </div>
+      </div>
+      <div class="filter-row">
+        <span class="filter-row-label">料理系統</span>
+        <div class="filter-tabs" id="ft-cuisine">
+          <button class="filter-tab active" onclick="setTagFilter('cuisine','all',this)">すべて</button>
+          <button class="filter-tab" onclick="setTagFilter('cuisine','和',this)">和</button>
+          <button class="filter-tab" onclick="setTagFilter('cuisine','洋',this)">洋</button>
+          <button class="filter-tab" onclick="setTagFilter('cuisine','中',this)">中</button>
+          <button class="filter-tab" onclick="setTagFilter('cuisine','他',this)">他</button>
+        </div>
+      </div>
+      <div class="filter-row">
+        <span class="filter-row-label">調理法</span>
+        <div class="filter-tabs" id="ft-method">
+          <button class="filter-tab active" onclick="setTagFilter('method','all',this)">すべて</button>
+          <button class="filter-tab" onclick="setTagFilter('method','焼',this)">焼</button>
+          <button class="filter-tab" onclick="setTagFilter('method','煮',this)">煮</button>
+          <button class="filter-tab" onclick="setTagFilter('method','蒸',this)">蒸</button>
+          <button class="filter-tab" onclick="setTagFilter('method','揚',this)">揚</button>
+          <button class="filter-tab" onclick="setTagFilter('method','他',this)">他</button>
+        </div>
+      </div>
+      <div class="filter-row">
+        <span class="filter-row-label">主食材</span>
+        <div class="filter-tabs" id="ft-protein">
+          <button class="filter-tab active" onclick="setTagFilter('protein','all',this)">すべて</button>
+          <button class="filter-tab" onclick="setTagFilter('protein','豚',this)">豚</button>
+          <button class="filter-tab" onclick="setTagFilter('protein','鶏',this)">鶏</button>
+          <button class="filter-tab" onclick="setTagFilter('protein','牛',this)">牛</button>
+          <button class="filter-tab" onclick="setTagFilter('protein','挽',this)">挽</button>
+          <button class="filter-tab" onclick="setTagFilter('protein','魚',this)">魚</button>
+          <button class="filter-tab" onclick="setTagFilter('protein','他',this)">他</button>
+        </div>
+      </div>
+      <div class="filter-row">
+        <span class="filter-row-label">調理時間</span>
+        <div style="display:flex;align-items:center;gap:10px;flex:1;">
+          <input type="range" id="time-slider" min="5" max="120" step="5" value="120" oninput="onTimeSlider(this.value)" style="flex:1;max-width:200px;">
+          <span id="time-slider-label" style="font-size:12px;color:#555;min-width:60px;">制限なし</span>
+          <button class="filter-tab active" id="time-reset-btn" onclick="resetTimeFilter()" style="font-size:11px;padding:3px 10px;">リセット</button>
+        </div>
       </div>
     </div>
+    <input class="recipe-search-bar" type="text" id="recipe-search" placeholder="レシピ名で検索..." oninput="renderRecipeGrid()">
     <div class="recipe-grid" id="recipe-grid"></div>
   </div>
 </div>
+<div class="modal-overlay" id="recipe-detail-overlay">
+  <div class="modal recipe-detail-modal">
+    <div class="modal-header">
+      <h3 id="rd-modal-title">レシピ詳細</h3>
+      <button class="modal-close" onclick="closeRecipeDetail()">✕</button>
+    </div>
+    <div class="modal-body" id="rd-modal-body"></div>
+  </div>
+</div>
 <div class="modal-overlay" id="modal-overlay">
-  <div class="modal">
+  <div class="modal" style="width:540px;">
     <div class="modal-header">
       <h3 id="modal-title">レシピを追加</h3>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body">
       <input class="search-box" type="text" placeholder="レシピ名で検索..." id="modal-search" oninput="filterModalRecipes()">
-      <div class="modal-ftabs filter-tabs">
-        <button class="filter-tab active" onclick="setModalFilter('all',this)">すべて</button>
-        <button class="filter-tab" onclick="setModalFilter('healsio',this)">ヘルシオ</button>
-        <button class="filter-tab" onclick="setModalFilter('normal',this)">通常</button>
+      <div style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px;background:#f5f5f0;border-radius:8px;padding:8px 10px;">
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <span style="font-size:10px;color:#888;font-weight:600;min-width:44px;">種別</span>
+          <div class="filter-tabs" id="mf-type">
+            <button class="filter-tab active" onclick="setModalTagFilter('type','all',this)">すべて</button>
+            <button class="filter-tab" onclick="setModalTagFilter('type','healsio',this)">ヘルシオ</button>
+            <button class="filter-tab" onclick="setModalTagFilter('type','normal',this)">通常</button>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <span style="font-size:10px;color:#888;font-weight:600;min-width:44px;">料理種別</span>
+          <div class="filter-tabs" id="mf-course">
+            <button class="filter-tab active" onclick="setModalTagFilter('course','all',this)">すべて</button>
+            <button class="filter-tab" onclick="setModalTagFilter('course','主菜',this)">主菜</button>
+            <button class="filter-tab" onclick="setModalTagFilter('course','副菜',this)">副菜</button>
+            <button class="filter-tab" onclick="setModalTagFilter('course','汁物',this)">汁物</button>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <span style="font-size:10px;color:#888;font-weight:600;min-width:44px;">系統</span>
+          <div class="filter-tabs" id="mf-cuisine">
+            <button class="filter-tab active" onclick="setModalTagFilter('cuisine','all',this)">すべて</button>
+            <button class="filter-tab" onclick="setModalTagFilter('cuisine','和',this)">和</button>
+            <button class="filter-tab" onclick="setModalTagFilter('cuisine','洋',this)">洋</button>
+            <button class="filter-tab" onclick="setModalTagFilter('cuisine','中',this)">中</button>
+            <button class="filter-tab" onclick="setModalTagFilter('cuisine','他',this)">他</button>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <span style="font-size:10px;color:#888;font-weight:600;min-width:44px;">調理法</span>
+          <div class="filter-tabs" id="mf-method">
+            <button class="filter-tab active" onclick="setModalTagFilter('method','all',this)">すべて</button>
+            <button class="filter-tab" onclick="setModalTagFilter('method','焼',this)">焼</button>
+            <button class="filter-tab" onclick="setModalTagFilter('method','煮',this)">煮</button>
+            <button class="filter-tab" onclick="setModalTagFilter('method','蒸',this)">蒸</button>
+            <button class="filter-tab" onclick="setModalTagFilter('method','揚',this)">揚</button>
+            <button class="filter-tab" onclick="setModalTagFilter('method','他',this)">他</button>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <span style="font-size:10px;color:#888;font-weight:600;min-width:44px;">主食材</span>
+          <div class="filter-tabs" id="mf-protein">
+            <button class="filter-tab active" onclick="setModalTagFilter('protein','all',this)">すべて</button>
+            <button class="filter-tab" onclick="setModalTagFilter('protein','豚',this)">豚</button>
+            <button class="filter-tab" onclick="setModalTagFilter('protein','鶏',this)">鶏</button>
+            <button class="filter-tab" onclick="setModalTagFilter('protein','牛',this)">牛</button>
+            <button class="filter-tab" onclick="setModalTagFilter('protein','挽',this)">挽</button>
+            <button class="filter-tab" onclick="setModalTagFilter('protein','魚',this)">魚</button>
+            <button class="filter-tab" onclick="setModalTagFilter('protein','他',this)">他</button>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <span style="font-size:10px;color:#888;font-weight:600;min-width:44px;">時間</span>
+          <input type="range" id="modal-time-slider" min="5" max="120" step="5" value="120" oninput="onModalTimeSlider(this.value)" style="flex:1;max-width:160px;">
+          <span id="modal-time-label" style="font-size:11px;color:#555;min-width:55px;">制限なし</span>
+          <button class="filter-tab active" id="modal-time-reset" onclick="resetModalTime()" style="font-size:10px;padding:2px 8px;">リセット</button>
+        </div>
       </div>
       <div class="recipe-list" id="modal-recipe-list"></div>
     </div>
@@ -254,29 +449,57 @@ var recipes = ${JSON.stringify(initialRecipes)};
 var mealPlan = ${JSON.stringify(initialMealPlan)};
 var nextId = ${Math.max(...initialRecipes.map(r => r.id), 6) + 1};
 var shoppingList = [];
-var currentModalFilter = 'all', currentRecipeFilter = 'all';
 var currentModalKey = null;
 var pendingJsonRecipes = [];
 var currentCookRecipe = null, currentCookPersons = 2, stepStates = [];
 var weekStart = null;
 var MEALS = ['昼','夜'];
-var CATEGORIES = ['肉・魚','野菜','調味料','乳製品・卵','その他'];
+var CATEGORIES = ['肉・魚','野菜','調味料','乳製品・卵','穀物・豆・乾物','その他'];
 var CMAP = ${JSON.stringify(cmap)};
+var tagFilters = {type:'all',course:'all',cuisine:'all',method:'all',protein:'all'};
+var timeFilterMax = 120;
+var modalTagFilters = {type:'all',course:'all',cuisine:'all',method:'all',protein:'all'};
+var modalTimeMax = 120;
 
 function scheduleSave(){
   if(window._st)clearTimeout(window._st);
-  window._st=setTimeout(function(){
-    if(window.saveDataFn)window.saveDataFn(recipes,mealPlan);
-  },1000);
+  window._st=setTimeout(function(){if(window.saveDataFn)window.saveDataFn(recipes,mealPlan);},1000);
 }
+function saveShoppingList(){try{localStorage.setItem('meal-planner-shopping',JSON.stringify(shoppingList));}catch(e){}}
+function loadShoppingList(){try{var s=localStorage.getItem('meal-planner-shopping');if(s){shoppingList=JSON.parse(s);if(shoppingList.length>0)renderShoppingList();}}catch(e){}}
+
 function toDateKey(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
 function addDays(d,n){var r=new Date(d);r.setDate(r.getDate()+n);return r;}
 function fromInputValue(s){var p=s.split('-').map(Number);return new Date(p[0],p[1]-1,p[2]);}
 function getDayLabel(d){return ['日','月','火','水','木','金','土'][d.getDay()]+' '+(d.getMonth()+1)+'/'+d.getDate();}
 function getWeekDates(){return Array.from({length:7},function(_,i){return addDays(weekStart,i);});}
-function parseAmount(str){var m=str.match(/^([\\d.\\/]+)\\s*([^\\d\\s].*)$/);if(m){var val;if(m[1].includes('/')){var p=m[1].split('/');val=parseFloat(p[0])/parseFloat(p[1]);}else val=parseFloat(m[1]);return{value:val,unit:m[2].trim()};}return null;}
+function parseAmount(str){var m=str.match(/^([\d.\\/]+)\\s*([^\\d\\s].*)$/);if(m){var val;if(m[1].includes('/')){var p=m[1].split('/');val=parseFloat(p[0])/parseFloat(p[1]);}else val=parseFloat(m[1]);return{value:val,unit:m[2].trim()};}return null;}
 function scaleIng(ing,base,persons){var ratio=persons/base;if(ratio===1)return ing;var si=ing.indexOf(' ');if(si===-1)return ing;var name=ing.slice(0,si),amt=ing.slice(si+1).trim(),p=parseAmount(amt);if(!p)return ing;var sc=p.value*ratio,ss=Number.isInteger(sc)?String(sc):(Math.round(sc*10)/10).toString();return name+' '+ss+p.unit;}
 function categorize(name){for(var k in CMAP){if(name.includes(k))return CMAP[k];}return 'その他';}
+function guessTimeMinutes(t){if(!t)return null;var m=t.match(/(\\d+)/);return m?parseInt(m[1]):null;}
+function guessTags(r){
+  var allText=(r.name||'')+' '+(r.mode||'')+' '+(r.ingredients||[]).join(' ');
+  var course='主菜';
+  if(/汁|スープ|みそ汁|味噌汁|ポタージュ|豚汁|けんちん/.test(allText))course='汁物';
+  else if(/サラダ|おひたし|和え|漬け|きんぴら|酢の物|ナムル|小鉢/.test(allText))course='副菜';
+  var cuisine='和';
+  if(/オリーブ|バター|チーズ|ワイン|クリーム|トマト|パスタ|ロースト|グラタン/.test(allText))cuisine='洋';
+  if(/豆板醤|オイスター|ごま油|中華|チンジャオ|餃子|八宝菜|麻婆/.test(allText))cuisine='中';
+  if(/醤油|みりん|だし|味噌|おひたし|煮物|照り焼き|唐揚/.test(allText))cuisine='和';
+  var method='他';
+  if(/焼く|焼き|ロースト|グリル|ソテー|炒め/.test(allText)||/焼/.test(r.mode||''))method='焼';
+  if(/煮る|煮物|煮込み|シチュー|スープ|汁/.test(allText)||/煮/.test(r.mode||''))method='煮';
+  if(/蒸す|蒸し/.test(allText)||/蒸/.test(r.mode||''))method='蒸';
+  if(/揚げ|フライ|天ぷら|から揚げ|唐揚/.test(allText))method='揚';
+  var protein='他';
+  if(/豚|ポーク|ばら|ロース/.test(allText))protein='豚';
+  if(/鶏|チキン|ささみ|から揚げ|唐揚/.test(allText))protein='鶏';
+  if(/牛|ビーフ/.test(allText))protein='牛';
+  if(/合いびき|ひき肉|ミンチ|ハンバーグ/.test(allText))protein='挽';
+  if(/サバ|鮭|たら|ぶり|あじ|まぐろ|えび|いか|魚|ツナ/.test(allText))protein='魚';
+  return{course:course,cuisine:cuisine,method:method,protein:protein};
+}
+recipes=recipes.map(function(r){if(!r.tags||!r.tags.course)r.tags=guessTags(r);return r;});
 
 function initWeekStart(){var t=new Date();weekStart=new Date(t.getFullYear(),t.getMonth(),t.getDate());document.getElementById('week-start-input').value=toDateKey(weekStart);refreshWeek();}
 function onWeekStartChange(val){if(!val)return;weekStart=fromInputValue(val);refreshWeek();}
@@ -354,7 +577,7 @@ function generateShoppingList(){
     if(uniq.length>0)parts.push(uniq.join('・'));else if(parts.length===0)parts.push('適量');
     return{id:i+1,name:item.name,category:item.category,checked:false,amount:parts.join(' + '),recipes:[...new Set(item.recipes)]};
   });
-  renderShoppingList();
+  saveShoppingList();renderShoppingList();
   showScreen('shopping',document.querySelectorAll('.nav-btn')[1]);
 }
 window.generateShoppingList=generateShoppingList;
@@ -373,18 +596,18 @@ function renderShoppingList(){
     items.forEach(function(item){
       var div=document.createElement('div');div.className='shop-item'+(item.checked?' checked':'');
       div.innerHTML='<div class="shop-check">'+(item.checked?'✓':'')+'</div><div class="shop-iname">'+item.name+'</div><div class="shop-iamount">'+item.amount+'</div><div class="shop-irecipes">'+item.recipes.slice(0,2).join('、')+(item.recipes.length>2?'…':'')+'</div><button class="shop-del" data-id="'+item.id+'">✕</button>';
-      div.onclick=function(e){if(!e.target.classList.contains('shop-del')){item.checked=!item.checked;renderShoppingList();}};
-      div.querySelector('.shop-del').onclick=function(e){e.stopPropagation();var id=parseInt(e.target.dataset.id);shoppingList=shoppingList.filter(function(i){return i.id!==id;});renderShoppingList();};
+      div.onclick=function(e){if(!e.target.classList.contains('shop-del')){item.checked=!item.checked;saveShoppingList();renderShoppingList();}};
+      div.querySelector('.shop-del').onclick=function(e){e.stopPropagation();var id=parseInt(e.target.dataset.id);shoppingList=shoppingList.filter(function(i){return i.id!==id;});saveShoppingList();renderShoppingList();};
       sec.appendChild(div);
     });
     container.appendChild(sec);
   });
 }
-function addManualItem(){var name=document.getElementById('manual-item').value.trim();if(!name)return;var amount=document.getElementById('manual-amount').value.trim();var maxId=shoppingList.reduce(function(m,i){return Math.max(m,i.id);},0);shoppingList.push({id:maxId+1,name:name,category:document.getElementById('manual-cat').value,checked:false,amount:amount||'適量',recipes:['手動追加']});document.getElementById('manual-item').value='';document.getElementById('manual-amount').value='';renderShoppingList();}
+function addManualItem(){var name=document.getElementById('manual-item').value.trim();if(!name)return;var amount=document.getElementById('manual-amount').value.trim();var maxId=shoppingList.reduce(function(m,i){return Math.max(m,i.id);},0);shoppingList.push({id:maxId+1,name:name,category:document.getElementById('manual-cat').value,checked:false,amount:amount||'適量',recipes:['手動追加']});document.getElementById('manual-item').value='';document.getElementById('manual-amount').value='';saveShoppingList();renderShoppingList();}
 window.addManualItem=addManualItem;
-function resetChecks(){shoppingList.forEach(function(i){i.checked=false;});renderShoppingList();}
+function resetChecks(){shoppingList.forEach(function(i){i.checked=false;});saveShoppingList();renderShoppingList();}
 window.resetChecks=resetChecks;
-function clearAllShop(){shoppingList=[];document.getElementById('shop-empty').style.display='block';document.getElementById('shop-content').style.display='none';}
+function clearAllShop(){shoppingList=[];saveShoppingList();document.getElementById('shop-empty').style.display='block';document.getElementById('shop-content').style.display='none';}
 window.clearAllShop=clearAllShop;
 
 function renderCookList(){
@@ -419,6 +642,7 @@ function renderCookList(){
     content.appendChild(sec);
   });
 }
+
 function openCookDetail(recipe,persons){
   currentCookRecipe=recipe;currentCookPersons=persons;stepStates=(recipe.steps||[]).map(function(){return false;});
   document.getElementById('cook-list').style.display='none';
@@ -428,8 +652,10 @@ function openCookDetail(recipe,persons){
   document.getElementById('cd-time').textContent=recipe.time||'';
   var hbox=document.getElementById('cd-healsio-box');
   hbox.innerHTML=(recipe.type==='healsio'&&recipe.mode)?'<div class="healsio-mode-box"><div class="healsio-mode-label">ヘルシオ 調理モード</div><div class="healsio-mode-value">'+recipe.mode+'</div></div>':'';
+  var imgBox=document.getElementById('cd-recipe-img-box');
+  imgBox.innerHTML=recipe.image?'<img src="'+recipe.image+'" alt="'+recipe.name+'" style="width:100%;height:140px;object-fit:cover;border-radius:8px;margin-bottom:10px;">':'';
   var base=recipe.servings||2,ingList=document.getElementById('cd-ingredients');
-  ingList.innerHTML=recipe.ingredients&&recipe.ingredients.length?recipe.ingredients.map(function(ing){var scaled=scaleIng(ing,base,persons),si=scaled.indexOf(' '),name=si===-1?scaled:scaled.slice(0,si),amount=si===-1?'':scaled.slice(si+1);return '<li class="ing-item"><span class="ing-name">'+name+'</span><span class="ing-amount'+(scaled!==ing?' ing-amount-scaled':'')+'">'+amount+'</span></li>';}).join(''):'<li class="ing-item" style="color:#aaa;">材料未登録</li>';
+  ingList.innerHTML=recipe.ingredients&&recipe.ingredients.length?recipe.ingredients.map(function(ing){var scaled=scaleIng(ing,base,persons),si=scaled.indexOf(' '),name=si===-1?scaled:scaled.slice(0,si),amount=si===-1?'':scaled.slice(si+1);return'<li class="ing-item"><span class="ing-name">'+name+'</span><span class="ing-amount'+(scaled!==ing?' ing-amount-scaled':'')+'">'+amount+'</span></li>';}).join(''):'<li class="ing-item" style="color:#aaa;">材料未登録</li>';
   renderSteps();
   document.getElementById('cook-detail').classList.add('active');
 }
@@ -441,7 +667,7 @@ function renderSteps(){
   var container=document.getElementById('cd-steps');
   if(!steps.length){container.innerHTML='<div style="color:#aaa;font-size:13px;padding:1rem 0;">手順未登録</div>';return;}
   var firstUndone=stepStates.findIndex(function(s){return !s;});
-  container.innerHTML=steps.map(function(step,i){var isDone=stepStates[i],isCurrent=i===firstUndone;return '<div class="step-item'+(isDone?' done':'')+(isCurrent?' current':'')+'" onclick="toggleStep('+i+')"><div class="step-num">'+(isDone?'✓':i+1)+'</div><div class="step-text">'+step+'</div></div>';}).join('');
+  container.innerHTML=steps.map(function(step,i){var isDone=stepStates[i],isCurrent=i===firstUndone;return'<div class="step-item'+(isDone?' done':'')+(isCurrent?' current':'')+'" onclick="toggleStep('+i+')"><div class="step-num">'+(isDone?'✓':i+1)+'</div><div class="step-text">'+step+'</div></div>';}).join('');
   var btn=document.getElementById('cd-next-btn');
   if(done===total&&total>0){btn.textContent='完成！お疲れ様でした';btn.disabled=true;btn.style.opacity='.5';}
   else{btn.textContent='次の手順へ';btn.disabled=false;btn.style.opacity='1';}
@@ -469,14 +695,18 @@ function previewJson(){
   var items=Array.isArray(parsed)?parsed:[parsed],valid=[];
   items.forEach(function(item){if(!item.name)return;if(!['healsio','normal'].includes(item.type))item.type='normal';if(!item.servings||isNaN(item.servings))item.servings=2;if(!Array.isArray(item.ingredients))item.ingredients=[];if(!Array.isArray(item.steps))item.steps=[];valid.push(item);});
   pendingJsonRecipes=valid;
-  preview.innerHTML=valid.map(function(r){return '<div class="json-preview-item"><div class="json-preview-name">'+r.name+' <span class="tag '+r.type+'">'+(r.type==='healsio'?'ヘルシオ':'通常')+'</span></div><div class="json-preview-meta">'+(r.time||'')+(r.mode?' · '+r.mode:'')+' · 基準'+r.servings+'人分 · 材料'+r.ingredients.length+'品 · '+r.steps.length+'ステップ</div></div>';}).join('');
+  preview.innerHTML=valid.map(function(r){return'<div class="json-preview-item"><div class="json-preview-name">'+r.name+' <span class="tag '+r.type+'">'+(r.type==='healsio'?'ヘルシオ':'通常')+'</span></div><div class="json-preview-meta">'+(r.time||'')+(r.mode?' · '+r.mode:'')+' · 基準'+r.servings+'人分 · 材料'+r.ingredients.length+'品 · '+r.steps.length+'ステップ</div></div>';}).join('');
   btn.style.display=valid.length>0?'inline-block':'none';
 }
 window.previewJson=previewJson;
 function registerJson(){
   if(!pendingJsonRecipes.length)return;
   var added=[];
-  pendingJsonRecipes.forEach(function(r){if(recipes.find(function(x){return x.name===r.name;}))return;recipes.push(Object.assign({id:nextId++},r));added.push(r.name);});
+  pendingJsonRecipes.forEach(function(r){
+    if(recipes.find(function(x){return x.name===r.name;}))return;
+    if(!r.tags){r.tags=guessTags(r);}else{var g=guessTags(r);if(!r.tags.course)r.tags.course=g.course;if(!r.tags.cuisine)r.tags.cuisine=g.cuisine;if(!r.tags.method)r.tags.method=g.method;if(!r.tags.protein)r.tags.protein=g.protein;}
+    recipes.push(Object.assign({id:nextId++},r));added.push(r.name);
+  });
   if(!added.length){alert('すべて登録済みのレシピでした。');return;}
   document.getElementById('json-input').value='';document.getElementById('json-preview').style.display='none';document.getElementById('json-register-btn').style.display='none';pendingJsonRecipes=[];
   scheduleSave();renderRecipeGrid();alert(added.length+'件登録しました。\\n'+added.join('、'));
@@ -485,43 +715,106 @@ window.registerJson=registerJson;
 function manualAdd(){
   var name=document.getElementById('m-name').value.trim();if(!name)return;
   var ing=document.getElementById('m-ingredients').value.trim(),sr=document.getElementById('m-steps').value.trim();
-  recipes.push({id:nextId++,name:name,type:document.getElementById('m-type').value,servings:parseInt(document.getElementById('m-servings').value),time:document.getElementById('m-time').value.trim(),mode:document.getElementById('m-mode').value.trim(),ingredients:ing?ing.split(/[,、]/).map(function(s){return s.trim();}).filter(Boolean):[],steps:sr?sr.split('\\n').map(function(s){return s.trim();}).filter(Boolean):[]});
+  var r={id:nextId++,name:name,type:document.getElementById('m-type').value,servings:parseInt(document.getElementById('m-servings').value),time:document.getElementById('m-time').value.trim(),mode:document.getElementById('m-mode').value.trim(),ingredients:ing?ing.split(/[,、]/).map(function(s){return s.trim();}).filter(Boolean):[],steps:sr?sr.split('\\n').map(function(s){return s.trim();}).filter(Boolean):[],tags:{course:document.getElementById('m-course').value||null,cuisine:document.getElementById('m-cuisine').value||null,method:document.getElementById('m-method').value||null,protein:document.getElementById('m-protein').value||null}};
+  var g=guessTags(r);if(!r.tags.course)r.tags.course=g.course;if(!r.tags.cuisine)r.tags.cuisine=g.cuisine;if(!r.tags.method)r.tags.method=g.method;if(!r.tags.protein)r.tags.protein=g.protein;
+  recipes.push(r);
   ['m-name','m-ingredients','m-time','m-mode','m-steps'].forEach(function(id){document.getElementById(id).value='';});
   scheduleSave();renderRecipeGrid();alert('レシピを登録しました。');
 }
 window.manualAdd=manualAdd;
-function setRecipeFilter(f,btn){currentRecipeFilter=f;document.querySelectorAll('.recipes-topbar .filter-tab').forEach(function(t){t.classList.remove('active');});btn.classList.add('active');renderRecipeGrid();}
-window.setRecipeFilter=setRecipeFilter;
+
+function setTagFilter(key,val,btn){tagFilters[key]=val;var group=btn.closest('.filter-tabs');if(group)group.querySelectorAll('.filter-tab').forEach(function(t){t.classList.remove('active');});btn.classList.add('active');renderRecipeGrid();}
+window.setTagFilter=setTagFilter;
+function onTimeSlider(val){timeFilterMax=parseInt(val);document.getElementById('time-slider-label').textContent=timeFilterMax>=120?'制限なし':timeFilterMax+'分以内';renderRecipeGrid();}
+window.onTimeSlider=onTimeSlider;
+function resetTimeFilter(){timeFilterMax=120;document.getElementById('time-slider').value=120;document.getElementById('time-slider-label').textContent='制限なし';renderRecipeGrid();}
+window.resetTimeFilter=resetTimeFilter;
+
 function renderRecipeGrid(){
-  var grid=document.getElementById('recipe-grid'),filtered=recipes.filter(function(r){return currentRecipeFilter==='all'||r.type===currentRecipeFilter;});
-  document.getElementById('recipe-count').textContent=recipes.length+'件登録済み';
-  if(!filtered.length){grid.innerHTML='<div style="color:#aaa;font-size:13px;">レシピがありません</div>';return;}
-  grid.innerHTML=filtered.map(function(r){return '<div class="recipe-card"><div class="rc-del" data-id="'+r.id+'">✕</div><span class="tag '+r.type+'" style="margin-bottom:8px;display:inline-block;">'+(r.type==='healsio'?'ヘルシオ':'通常')+'</span><div class="rc-name">'+r.name+'</div><div class="rc-servings">基準 '+(r.servings||2)+'人分</div><div class="rc-meta">'+(r.time||'')+(r.mode?'<br>'+r.mode:'')+(r.ingredients&&r.ingredients.length?'<br>'+r.ingredients.slice(0,3).join('、')+(r.ingredients.length>3?'...':''):'')+'</div></div>';}).join('');
-  grid.querySelectorAll('.rc-del').forEach(function(b){b.onclick=function(){if(confirm('削除しますか？')){var id=parseInt(b.dataset.id);recipes=recipes.filter(function(r){return r.id!==id;});Object.keys(mealPlan).forEach(function(k){if(mealPlan[k]&&mealPlan[k].recipeIds){mealPlan[k].recipeIds=mealPlan[k].recipeIds.filter(function(rid){return rid!==id;});if(mealPlan[k].recipeIds.length===0)delete mealPlan[k];}});scheduleSave();renderRecipeGrid();renderGrid();renderCookList();}};});
+  var grid=document.getElementById('recipe-grid');
+  var q=(document.getElementById('recipe-search')?.value||'').toLowerCase();
+  var filtered=recipes.filter(function(r){
+    if(tagFilters.type!=='all'&&r.type!==tagFilters.type)return false;
+    if(tagFilters.course!=='all'&&r.tags?.course!==tagFilters.course)return false;
+    if(tagFilters.cuisine!=='all'&&r.tags?.cuisine!==tagFilters.cuisine)return false;
+    if(tagFilters.method!=='all'&&r.tags?.method!==tagFilters.method)return false;
+    if(tagFilters.protein!=='all'&&r.tags?.protein!==tagFilters.protein)return false;
+    if(timeFilterMax<120){var mins=guessTimeMinutes(r.time);if(mins!==null&&mins>timeFilterMax)return false;}
+    if(q&&!r.name.toLowerCase().includes(q))return false;
+    return true;
+  });
+  document.getElementById('recipe-count').textContent=filtered.length+' / '+recipes.length+'件';
+  if(!filtered.length){grid.innerHTML='<div style="color:#aaa;font-size:13px;">条件に合うレシピが見つかりません</div>';return;}
+  grid.innerHTML=filtered.map(function(r){var tags=r.tags||{};return'<div class="recipe-card" onclick="openRecipeDetail('+r.id+')"><div class="rc-del" onclick="event.stopPropagation();deleteRecipe('+r.id+')">✕</div>'+(r.image?'<img class="rc-img" src="'+r.image+'" alt="'+r.name+'">'+'':'<div class="rc-img-placeholder" onclick="event.stopPropagation();triggerImageUpload('+r.id+')">＋ 写真を追加</div>')+'<span class="tag '+r.type+'" style="margin-bottom:6px;display:inline-block;">'+(r.type==='healsio'?'ヘルシオ':'通常')+'</span><div class="rc-name">'+r.name+'</div><div class="rc-servings">基準 '+(r.servings||2)+'人分'+(r.time?' · '+r.time:'')+'</div><div style="margin-top:4px;flex-wrap:wrap;display:flex;gap:2px;">'+(tags.course?'<span class="tag-badge course">'+tags.course+'</span>':'')+(tags.cuisine?'<span class="tag-badge cuisine">'+tags.cuisine+'</span>':'')+(tags.method?'<span class="tag-badge method">'+tags.method+'</span>':'')+(tags.protein?'<span class="tag-badge protein">'+tags.protein+'</span>':'')+'</div><div style="font-size:10px;color:#aaa;margin-top:5px;">タップして詳細を見る</div></div>';}).join('');
 }
+
+function triggerImageUpload(recipeId){var input=document.createElement('input');input.type='file';input.accept='image/*';input.onchange=function(e){var file=e.target.files[0];if(!file)return;var reader=new FileReader();reader.onload=function(ev){var r=recipes.find(function(r){return r.id===recipeId;});if(r){r.image=ev.target.result;scheduleSave();renderRecipeGrid();}};reader.readAsDataURL(file);};input.click();}
+window.triggerImageUpload=triggerImageUpload;
+
+function openRecipeDetail(id){
+  var r=recipes.find(function(r){return r.id===id;});if(!r)return;
+  document.getElementById('rd-modal-title').textContent=r.name;
+  var tags=r.tags||{};
+  var html='';
+  if(r.image)html+='<img class="rd-img" src="'+r.image+'" alt="'+r.name+'">';
+  html+='<div class="rd-badges"><span class="tag '+r.type+'">'+(r.type==='healsio'?'ヘルシオ':'通常')+'</span>'+(r.time?'<span class="rd-badge">'+r.time+'</span>':'')+'<span class="rd-badge">基準 '+(r.servings||2)+'人分</span><button class="btn-secondary btn-sm" onclick="triggerImageUpload('+r.id+');closeRecipeDetail();" style="font-size:10px;padding:3px 10px;">'+(r.image?'写真を変更':'＋ 写真を追加')+'</button></div>';
+  html+='<div style="margin-bottom:1rem;"><div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px;">'+(tags.course?'<span class="tag-badge course">'+tags.course+'</span>':'')+(tags.cuisine?'<span class="tag-badge cuisine">'+tags.cuisine+'</span>':'')+(tags.method?'<span class="tag-badge method">'+tags.method+'</span>':'')+(tags.protein?'<span class="tag-badge protein">'+tags.protein+'</span>':'')+'</div><details style="font-size:12px;"><summary style="cursor:pointer;color:#888;margin-bottom:6px;">タグを編集</summary><div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;"><select id="edit-course-'+r.id+'" class="inp-sm" style="font-size:11px;padding:4px 6px;"><option value="">種別</option>'+['主菜','副菜','汁物'].map(function(v){return'<option'+(tags.course===v?' selected':'')+'>'+v+'</option>';}).join('')+'</select><select id="edit-cuisine-'+r.id+'" class="inp-sm" style="font-size:11px;padding:4px 6px;"><option value="">系統</option>'+['和','洋','中','他'].map(function(v){return'<option'+(tags.cuisine===v?' selected':'')+'>'+v+'</option>';}).join('')+'</select><select id="edit-method-'+r.id+'" class="inp-sm" style="font-size:11px;padding:4px 6px;"><option value="">調理法</option>'+['焼','煮','蒸','揚','他'].map(function(v){return'<option'+(tags.method===v?' selected':'')+'>'+v+'</option>';}).join('')+'</select><select id="edit-protein-'+r.id+'" class="inp-sm" style="font-size:11px;padding:4px 6px;"><option value="">食材</option>'+['豚','鶏','牛','挽','魚','他'].map(function(v){return'<option'+(tags.protein===v?' selected':'')+'>'+v+'</option>';}).join('')+'</select><button class="btn-import" style="font-size:11px;padding:5px 12px;" onclick="saveTagEdit('+r.id+')">保存</button></div></details></div>';
+  if(r.type==='healsio'&&r.mode)html+='<div class="rd-healsio-box"><div class="rd-healsio-label">ヘルシオ 調理モード</div><div class="rd-healsio-value">'+r.mode+'</div></div>';
+  if(r.ingredients&&r.ingredients.length){html+='<div class="rd-section-title">材料（'+(r.servings||2)+'人分）</div><ul class="rd-ingredients">'+r.ingredients.map(function(ing){var si=ing.indexOf(' '),name=si===-1?ing:ing.slice(0,si),amount=si===-1?'':ing.slice(si+1);return'<li class="rd-ing-item"><span class="rd-ing-name">'+name+'</span><span class="rd-ing-amount">'+amount+'</span></li>';}).join('')+'</ul>';}
+  else html+='<div class="rd-section-title">材料</div><div style="color:#aaa;font-size:13px;margin-bottom:1rem;">未登録</div>';
+  html+='<div class="rd-section-title">手順</div>';
+  if(r.steps&&r.steps.length)html+='<div class="rd-steps">'+r.steps.map(function(step,i){return'<div class="rd-step"><div class="rd-step-num">'+(i+1)+'</div><div class="rd-step-text">'+step+'</div></div>';}).join('')+'</div>';
+  else html+='<div style="color:#aaa;font-size:13px;">未登録</div>';
+  document.getElementById('rd-modal-body').innerHTML=html;
+  document.getElementById('recipe-detail-overlay').classList.add('open');
+}
+function saveTagEdit(id){var r=recipes.find(function(r){return r.id===id;});if(!r)return;if(!r.tags)r.tags={};r.tags.course=document.getElementById('edit-course-'+id)?.value||r.tags.course;r.tags.cuisine=document.getElementById('edit-cuisine-'+id)?.value||r.tags.cuisine;r.tags.method=document.getElementById('edit-method-'+id)?.value||r.tags.method;r.tags.protein=document.getElementById('edit-protein-'+id)?.value||r.tags.protein;scheduleSave();closeRecipeDetail();renderRecipeGrid();}
+window.saveTagEdit=saveTagEdit;
+function closeRecipeDetail(){document.getElementById('recipe-detail-overlay').classList.remove('open');}
+window.closeRecipeDetail=closeRecipeDetail;
+
+function deleteRecipe(id){if(!confirm('このレシピを削除しますか？'))return;recipes=recipes.filter(function(r){return r.id!==id;});Object.keys(mealPlan).forEach(function(k){if(mealPlan[k]&&mealPlan[k].recipeIds){mealPlan[k].recipeIds=mealPlan[k].recipeIds.filter(function(rid){return rid!==id;});if(mealPlan[k].recipeIds.length===0)delete mealPlan[k];}});scheduleSave();renderRecipeGrid();renderGrid();renderCookList();}
 function exportRecipes(){var blob=new Blob([JSON.stringify(recipes,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='recipes_backup.json';a.click();URL.revokeObjectURL(url);}
 window.exportRecipes=exportRecipes;
 
-function openModal(key,day,meal){currentModalKey=key;document.getElementById('modal-title').textContent=day+'曜 '+meal+' にレシピを追加';document.getElementById('modal-search').value='';currentModalFilter='all';document.querySelectorAll('.modal-ftabs .filter-tab').forEach(function(t,i){t.classList.toggle('active',i===0);});filterModalRecipes();document.getElementById('modal-overlay').classList.add('open');}
+var modalTagFilters={type:'all',course:'all',cuisine:'all',method:'all',protein:'all'};
+var modalTimeMax=120;
+function onModalTimeSlider(val){modalTimeMax=parseInt(val);document.getElementById('modal-time-label').textContent=modalTimeMax>=120?'制限なし':modalTimeMax+'分以内';filterModalRecipes();}
+window.onModalTimeSlider=onModalTimeSlider;
+function resetModalTime(){modalTimeMax=120;document.getElementById('modal-time-slider').value=120;document.getElementById('modal-time-label').textContent='制限なし';filterModalRecipes();}
+window.resetModalTime=resetModalTime;
+function setModalTagFilter(key,val,btn){modalTagFilters[key]=val;var group=btn.closest('.filter-tabs');if(group)group.querySelectorAll('.filter-tab').forEach(function(t){t.classList.remove('active');});btn.classList.add('active');filterModalRecipes();}
+window.setModalTagFilter=setModalTagFilter;
+
+function openModal(key,day,meal){currentModalKey=key;document.getElementById('modal-title').textContent=day+'曜 '+meal+' にレシピを追加';document.getElementById('modal-search').value='';Object.keys(modalTagFilters).forEach(function(k){modalTagFilters[k]='all';});modalTimeMax=120;document.getElementById('modal-time-slider').value=120;document.getElementById('modal-time-label').textContent='制限なし';['mf-type','mf-course','mf-cuisine','mf-method','mf-protein'].forEach(function(id){document.getElementById(id)?.querySelectorAll('.filter-tab').forEach(function(t,i){t.classList.toggle('active',i===0);});});filterModalRecipes();document.getElementById('modal-overlay').classList.add('open');}
 function closeModal(){document.getElementById('modal-overlay').classList.remove('open');currentModalKey=null;}
 window.closeModal=closeModal;
-function setModalFilter(f,btn){currentModalFilter=f;document.querySelectorAll('.modal-ftabs .filter-tab').forEach(function(t){t.classList.remove('active');});btn.classList.add('active');filterModalRecipes();}
-window.setModalFilter=setModalFilter;
 function filterModalRecipes(){
-  var q=document.getElementById('modal-search').value.toLowerCase(),existingIds=currentModalKey&&mealPlan[currentModalKey]?mealPlan[currentModalKey].recipeIds:[];
-  var filtered=recipes.filter(function(r){return(currentModalFilter==='all'||r.type===currentModalFilter)&&r.name.toLowerCase().includes(q);});
+  var q=document.getElementById('modal-search').value.toLowerCase();
+  var existingIds=currentModalKey&&mealPlan[currentModalKey]?mealPlan[currentModalKey].recipeIds:[];
+  var filtered=recipes.filter(function(r){
+    if(modalTagFilters.type!=='all'&&r.type!==modalTagFilters.type)return false;
+    if(modalTagFilters.course!=='all'&&r.tags?.course!==modalTagFilters.course)return false;
+    if(modalTagFilters.cuisine!=='all'&&r.tags?.cuisine!==modalTagFilters.cuisine)return false;
+    if(modalTagFilters.method!=='all'&&r.tags?.method!==modalTagFilters.method)return false;
+    if(modalTagFilters.protein!=='all'&&r.tags?.protein!==modalTagFilters.protein)return false;
+    if(modalTimeMax<120){var mins=guessTimeMinutes(r.time);if(mins!==null&&mins>modalTimeMax)return false;}
+    if(q&&!r.name.toLowerCase().includes(q))return false;
+    return true;
+  });
   var list=document.getElementById('modal-recipe-list');
   if(!filtered.length){list.innerHTML='<div style="color:#aaa;font-size:13px;text-align:center;padding:1rem;">レシピが見つかりません</div>';return;}
-  list.innerHTML=filtered.map(function(r){var added=existingIds.includes(r.id);return '<div class="recipe-item" data-id="'+r.id+'" style="'+(added?'opacity:.5;cursor:default;':'')+'"><div class="r-name">'+r.name+(added?' <span style="font-size:11px;color:#aaa;">（追加済み）</span>':'')+'</div><div class="r-meta">'+(r.time||'')+(r.mode?' · '+r.mode:'')+'</div><div class="r-servings">基準 '+(r.servings||2)+'人分</div><span class="tag '+r.type+'">'+(r.type==='healsio'?'ヘルシオ':'通常')+'</span></div>';}).join('');
-  list.querySelectorAll('.recipe-item').forEach(function(el){el.onclick=function(){var id=parseInt(el.dataset.id);if(!(currentModalKey&&mealPlan[currentModalKey]&&mealPlan[currentModalKey].recipeIds.includes(id))){if(!mealPlan[currentModalKey])mealPlan[currentModalKey]={persons:2,recipeIds:[]};mealPlan[currentModalKey].recipeIds.push(id);scheduleSave();renderGrid();filterModalRecipes();}};});
+  list.innerHTML=filtered.map(function(r){var added=existingIds.includes(r.id);var tags=r.tags||{};return'<div class="recipe-item" style="'+(added?'opacity:.5;cursor:default;':'')+'" onclick="'+(added?'':'addRecipeToCell('+r.id+')')+'"><div style="display:flex;gap:10px;align-items:flex-start;">'+(r.image?'<img src="'+r.image+'" style="width:56px;height:56px;object-fit:cover;border-radius:6px;flex-shrink:0;">':'')+'<div style="flex:1;min-width:0;"><div class="r-name">'+r.name+(added?' <span style="font-size:11px;color:#aaa;">（追加済み）</span>':'')+'</div><div class="r-meta">'+(r.time||'')+(r.mode?' · '+r.mode:'')+' · 基準'+(r.servings||2)+'人分</div><div style="display:flex;gap:3px;flex-wrap:wrap;margin-top:4px;"><span class="tag '+r.type+'">'+(r.type==='healsio'?'ヘルシオ':'通常')+'</span>'+(tags.course?'<span class="tag-badge course" style="font-size:9px;">'+tags.course+'</span>':'')+(tags.cuisine?'<span class="tag-badge cuisine" style="font-size:9px;">'+tags.cuisine+'</span>':'')+(tags.method?'<span class="tag-badge method" style="font-size:9px;">'+tags.method+'</span>':'')+(tags.protein?'<span class="tag-badge protein" style="font-size:9px;">'+tags.protein+'</span>':'')+'</div></div></div></div>';}).join('');
 }
-function quickAdd(){var name=document.getElementById('quick-name').value.trim();if(!name)return;recipes.push({id:nextId++,name:name,type:document.getElementById('quick-type').value,servings:2,time:'',mode:'',ingredients:[],steps:[]});document.getElementById('quick-name').value='';scheduleSave();filterModalRecipes();renderRecipeGrid();}
+function addRecipeToCell(rid){if(!currentModalKey)return;var data=getCellData(currentModalKey);if(!data.recipeIds.includes(rid))data.recipeIds.push(rid);scheduleSave();renderGrid();filterModalRecipes();}
+function quickAdd(){var name=document.getElementById('quick-name').value.trim();if(!name)return;var r={id:nextId++,name:name,type:document.getElementById('quick-type').value,servings:2,time:'',mode:'',ingredients:[],steps:[]};r.tags=guessTags(r);recipes.push(r);document.getElementById('quick-name').value='';scheduleSave();filterModalRecipes();renderRecipeGrid();}
 window.quickAdd=quickAdd;
 
 function showScreen(name,btn){document.querySelectorAll('.screen').forEach(function(s){s.classList.remove('active');});document.querySelectorAll('.nav-btn').forEach(function(b){b.classList.remove('active');});document.getElementById('screen-'+name).classList.add('active');if(btn)btn.classList.add('active');if(name==='cooking')renderCookList();}
 window.showScreen=showScreen;
 
 initWeekStart();
+loadShoppingList();
 renderRecipeGrid();
 })();
 `
