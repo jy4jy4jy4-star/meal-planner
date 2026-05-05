@@ -101,30 +101,24 @@ export async function GET() {
   }
 }
 
-// Bulk POST kept for backward compatibility, but now splits into per-recipe keys.
-// Avoid using this from the client for large datasets — prefer /api/recipes/upsert.
+// Bulk POST is now ADDITIVE ONLY. It used to delete IDs that were not in the
+// incoming list, but that caused data loss when stale browser caches sent partial
+// recipe lists. Prefer /api/recipes/upsert and DELETE /api/recipes/[id] for
+// explicit operations.
 export async function POST(req: Request) {
   try {
     const recipes: Recipe[] = await req.json()
-    const existingIds = await getAllIds()
     const newIds = recipes.map((r) => r.id)
-    const toDelete = existingIds.filter((id) => !newIds.includes(id))
 
     const pipeline = redis.pipeline()
     for (const r of recipes) pipeline.set(RECIPE_KEY(r.id), r)
-    for (const id of toDelete) pipeline.del(RECIPE_KEY(id))
-    if (toDelete.length > 0) {
-      const [first, ...rest] = toDelete.map(String)
-      pipeline.srem(IDS_KEY, first, ...rest)
-    }
     if (newIds.length > 0) {
       const [first, ...rest] = newIds.map(String)
       pipeline.sadd(IDS_KEY, first, ...rest)
     }
-    pipeline.del(LEGACY_RECIPES_KEY)
     await pipeline.exec()
 
-    return NextResponse.json({ ok: true })
+    return NextResponse.json({ ok: true, additiveOnly: true })
   } catch (e) {
     console.error('POST /api/recipes failed', e)
     return NextResponse.json({ error: 'Failed to save' }, { status: 500 })
