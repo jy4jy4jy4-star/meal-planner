@@ -94,26 +94,58 @@ function guessTagsTS(recipe: any) {
 export default function Home() {
   const initialized = useRef(false)
   const nextIdRef = useRef(7)
-  const saveData = useCallback(async (recipes: Recipe[], mealPlan: MealPlan): Promise<boolean | string> => {
+  const showSavedIndicator = () => {
+    const el = document.getElementById('save-indicator')
+    if (el) { el.textContent = '保存しました'; el.classList.add('show'); setTimeout(() => el.classList.remove('show'), 2000) }
+  }
+  const saveMealPlan = useCallback(async (mealPlan: MealPlan): Promise<boolean | string> => {
     try {
-      const recipesBody = JSON.stringify(recipes)
-      const mealPlanBody = JSON.stringify(mealPlan)
-      const sizeKB = Math.round((recipesBody.length + mealPlanBody.length) / 1024)
-      const [r1, r2] = await Promise.all([
-        fetch('/api/recipes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: recipesBody }),
-        fetch('/api/mealplan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: mealPlanBody }),
-      ])
-      if (!r1.ok || !r2.ok) {
-        const errText = !r1.ok ? `recipes API ${r1.status}: ${await r1.text().catch(() => '')}` : `mealplan API ${r2.status}: ${await r2.text().catch(() => '')}`
-        console.error('save failed', errText, 'payload size:', sizeKB, 'KB')
-        return `${errText} (送信サイズ ${sizeKB}KB)`
+      const body = JSON.stringify(mealPlan)
+      const r = await fetch('/api/mealplan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
+      if (!r.ok) {
+        const errText = `mealplan API ${r.status}: ${await r.text().catch(() => '')}`
+        console.error('save mealplan failed', errText)
+        return errText
       }
-      const el = document.getElementById('save-indicator')
-      if (el) { el.textContent = '保存しました'; el.classList.add('show'); setTimeout(() => el.classList.remove('show'), 2000) }
+      showSavedIndicator()
       return true
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
-      console.error('save failed', e)
+      console.error('save mealplan failed', e)
+      return `通信エラー: ${msg}`
+    }
+  }, [])
+  const saveRecipe = useCallback(async (recipe: Recipe): Promise<boolean | string> => {
+    try {
+      const body = JSON.stringify({ recipe })
+      const sizeKB = Math.round(body.length / 1024)
+      const r = await fetch('/api/recipes/upsert', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
+      if (!r.ok) {
+        const errText = `recipes upsert ${r.status}: ${await r.text().catch(() => '')} (送信サイズ ${sizeKB}KB)`
+        console.error('save recipe failed', errText)
+        return errText
+      }
+      showSavedIndicator()
+      return true
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('save recipe failed', e)
+      return `通信エラー: ${msg}`
+    }
+  }, [])
+  const deleteRecipeApi = useCallback(async (id: number): Promise<boolean | string> => {
+    try {
+      const r = await fetch(`/api/recipes/${id}`, { method: 'DELETE' })
+      if (!r.ok) {
+        const errText = `recipes delete ${r.status}: ${await r.text().catch(() => '')}`
+        console.error('delete recipe failed', errText)
+        return errText
+      }
+      showSavedIndicator()
+      return true
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('delete recipe failed', e)
       return `通信エラー: ${msg}`
     }
   }, [])
@@ -127,19 +159,25 @@ export default function Home() {
         fetch('/api/mealplan').then(r => r.json()).catch(() => ({})),
       ])
       const loadedRecipes: Recipe[] = recipesRes.length > 0 ? recipesRes : DEFAULT_RECIPES
-      let needsSave = false
+      const recipesToMigrate: Recipe[] = []
       const migrated = loadedRecipes.map((r: any) => {
-        if (!r.tags || !r.tags.course) { r.tags = guessTagsTS(r); needsSave = true }
+        if (!r.tags || !r.tags.course) { r.tags = guessTagsTS(r); recipesToMigrate.push(r) }
         return r
       })
-      if (needsSave) fetch('/api/recipes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(migrated) }).catch(() => {})
+      // Migrate recipes missing tags via per-recipe upsert (avoids 4.5MB body limit on bulk POST)
+      for (const r of recipesToMigrate) {
+        fetch('/api/recipes/upsert', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recipe: r }) }).catch(() => {})
+      }
       if (migrated.length > 0) nextIdRef.current = Math.max(...migrated.map((r: Recipe) => r.id)) + 1
-      ;(window as any).saveDataFn = saveData
-      ;(window as any).nextIdRef = nextIdRef
+      const w = window as unknown as Record<string, unknown>
+      w.saveMealPlanFn = saveMealPlan
+      w.saveRecipeFn = saveRecipe
+      w.deleteRecipeFn = deleteRecipeApi
+      w.nextIdRef = nextIdRef
       injectApp(migrated, mealPlanRes, CMAP)
     }
     init()
-  }, [saveData])
+  }, [saveMealPlan, saveRecipe, deleteRecipeApi])
 
   return (
     <>
@@ -367,8 +405,10 @@ var MEALS=['昼','夜'],CATEGORIES=['肉・魚','野菜','調味料','乳製品�
 var CMAP=${JSON.stringify(cmap)};
 var tagFilters={type:'all',course:'all',cuisine:'all',method:'all',protein:'all'},timeFilterMax=120;
 var modalTagFilters={type:'all',course:'all',cuisine:'all',method:'all',protein:'all'},modalTimeMax=120;
-function scheduleSave(){if(window._st)clearTimeout(window._st);window._st=setTimeout(function(){if(window.saveDataFn)window.saveDataFn(recipes,mealPlan);},1000);}
-function flushSave(){if(window._st){clearTimeout(window._st);window._st=null;}if(window.saveDataFn)return window.saveDataFn(recipes,mealPlan);return Promise.resolve(false);}
+function scheduleSave(){if(window._st)clearTimeout(window._st);window._st=setTimeout(function(){if(window.saveMealPlanFn)window.saveMealPlanFn(mealPlan);},1000);}
+function flushSave(){if(window._st){clearTimeout(window._st);window._st=null;}if(window.saveMealPlanFn)return window.saveMealPlanFn(mealPlan);return Promise.resolve(false);}
+function saveRecipeApi(r){if(window.saveRecipeFn)return window.saveRecipeFn(r);return Promise.resolve(false);}
+function deleteRecipeApi(id){if(window.deleteRecipeFn)return window.deleteRecipeFn(id);return Promise.resolve(false);}
 function saveShoppingList(){try{localStorage.setItem('mps',JSON.stringify(shoppingList));}catch(e){}}
 function loadShoppingList(){try{var s=localStorage.getItem('mps');if(s){shoppingList=JSON.parse(s);if(shoppingList.length>0)renderShoppingList();}}catch(e){}}
 function toDateKey(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
@@ -599,18 +639,20 @@ function previewJson(){
 }window.previewJson=previewJson;
 function registerJson(){
   if(!pendingJsonRecipes.length)return;
-  var added=[];
+  var newRecipes=[];
   pendingJsonRecipes.forEach(function(r){
     if(recipes.find(function(x){return x.name===r.name;}))return;
     if(!r.tags){r.tags=guessTags(r);}else{var g=guessTags(r);if(!r.tags.course)r.tags.course=g.course;if(!r.tags.cuisine)r.tags.cuisine=g.cuisine;if(!r.tags.method)r.tags.method=g.method;if(!r.tags.protein)r.tags.protein=g.protein;}
-    recipes.push(Object.assign({id:nextId++},r));added.push(r.name);
+    var rec=Object.assign({id:nextId++},r);
+    recipes.push(rec);newRecipes.push(rec);
   });
-  if(!added.length){alert('すべて登録済みのレシピでした。');return;}
+  if(!newRecipes.length){alert('すべて登録済みのレシピでした。');return;}
   document.getElementById('json-input').value='';document.getElementById('json-preview').style.display='none';document.getElementById('json-register-btn').style.display='none';pendingJsonRecipes=[];
   renderRecipeGrid();
-  flushSave().then(function(ok){
-    if(ok!==true){alert('保存に失敗しました。\\n'+(typeof ok==='string'?ok:'ネットワーク接続を確認してください。'));return;}
-    alert(added.length+'件登録しました。\\n'+added.join('、'));
+  Promise.all(newRecipes.map(function(r){return saveRecipeApi(r);})).then(function(results){
+    var failed=results.filter(function(x){return x!==true;});
+    if(failed.length>0){alert(failed.length+'件の保存に失敗しました。\\n'+(typeof failed[0]==='string'?failed[0]:'ネットワーク接続を確認してください。'));return;}
+    alert(newRecipes.length+'件登録しました。\\n'+newRecipes.map(function(r){return r.name;}).join('、'));
   });
 }window.registerJson=registerJson;
 function manualAdd(){
@@ -620,7 +662,7 @@ function manualAdd(){
   var g=guessTags(r);if(!r.tags.course)r.tags.course=g.course;if(!r.tags.cuisine)r.tags.cuisine=g.cuisine;if(!r.tags.method)r.tags.method=g.method;if(!r.tags.protein)r.tags.protein=g.protein;
   recipes.push(r);['m-name','m-ingredients','m-time','m-mode','m-steps'].forEach(function(id){document.getElementById(id).value='';});
   renderRecipeGrid();
-  flushSave().then(function(ok){
+  saveRecipeApi(r).then(function(ok){
     if(ok!==true)alert('保存に失敗しました。\\n'+(typeof ok==='string'?ok:'ネットワーク接続を確認してください。'));
     else alert('レシピを登録しました。');
   });
@@ -645,7 +687,7 @@ function renderRecipeGrid(){
   if(!filtered.length){grid.innerHTML='<div style="color:#aaa;font-size:13px;">条件に合うレシピが見つかりません</div>';return;}
   grid.innerHTML=filtered.map(function(r){var tags=r.tags||{};return'<div class="recipe-card" onclick="openRecipeDetail('+r.id+')"><div class="rc-del" onclick="event.stopPropagation();deleteRecipe('+r.id+')">✕</div>'+(r.image?'<img class="rc-img" src="'+r.image+'">':'<div class="rc-img-placeholder" onclick="event.stopPropagation();triggerImageUpload('+r.id+')">＋ 写真を追加</div>')+'<span class="tag '+r.type+'" style="margin-bottom:6px;display:inline-block;">'+(r.type==='healsio'?'ヘルシオ':'通常')+'</span><div class="rc-name">'+r.name+'</div><div class="rc-servings">基準 '+(r.servings||2)+'人分'+(r.time?' · '+r.time:'')+'</div><div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:2px;">'+(tags.course?'<span class="tag-badge course">'+tags.course+'</span>':'')+(tags.cuisine?'<span class="tag-badge cuisine">'+tags.cuisine+'</span>':'')+(tags.method?'<span class="tag-badge method">'+tags.method+'</span>':'')+(tags.protein?'<span class="tag-badge protein">'+tags.protein+'</span>':'')+'</div><div style="font-size:10px;color:#aaa;margin-top:5px;">タップして詳細を見る</div></div>';}).join('');
 }window.renderRecipeGrid=renderRecipeGrid;
-function triggerImageUpload(recipeId){var input=document.createElement('input');input.type='file';input.accept='image/*';input.onchange=function(e){var file=e.target.files[0];if(!file)return;var reader=new FileReader();reader.onload=function(ev){var r=recipes.find(function(r){return r.id===recipeId;});if(r){r.image=ev.target.result;scheduleSave();renderRecipeGrid();}};reader.readAsDataURL(file);};input.click();}window.triggerImageUpload=triggerImageUpload;
+function triggerImageUpload(recipeId){var input=document.createElement('input');input.type='file';input.accept='image/*';input.onchange=function(e){var file=e.target.files[0];if(!file)return;var reader=new FileReader();reader.onload=function(ev){var r=recipes.find(function(r){return r.id===recipeId;});if(r){r.image=ev.target.result;renderRecipeGrid();saveRecipeApi(r).then(function(ok){if(ok!==true)alert('画像の保存に失敗しました。\\n'+(typeof ok==='string'?ok:'ネットワーク接続を確認してください。'));});}};reader.readAsDataURL(file);};input.click();}window.triggerImageUpload=triggerImageUpload;
 function openRecipeDetail(id){
   var r=recipes.find(function(r){return r.id===id;});if(!r)return;
   document.getElementById('rd-modal-title').textContent=r.name;
@@ -663,9 +705,9 @@ function openRecipeDetail(id){
   document.getElementById('rd-modal-body').innerHTML=html;
   document.getElementById('recipe-detail-overlay').classList.add('open');
 }window.openRecipeDetail=openRecipeDetail;
-function saveTagEdit(id){var r=recipes.find(function(r){return r.id===id;});if(!r)return;if(!r.tags)r.tags={};var ec=document.getElementById('ec-'+id),eu=document.getElementById('eu-'+id),em=document.getElementById('em-'+id),ep=document.getElementById('ep-'+id);if(ec&&ec.value)r.tags.course=ec.value;if(eu&&eu.value)r.tags.cuisine=eu.value;if(em&&em.value)r.tags.method=em.value;if(ep&&ep.value)r.tags.protein=ep.value;scheduleSave();closeRecipeDetail();renderRecipeGrid();}window.saveTagEdit=saveTagEdit;
+function saveTagEdit(id){var r=recipes.find(function(r){return r.id===id;});if(!r)return;if(!r.tags)r.tags={};var ec=document.getElementById('ec-'+id),eu=document.getElementById('eu-'+id),em=document.getElementById('em-'+id),ep=document.getElementById('ep-'+id);if(ec&&ec.value)r.tags.course=ec.value;if(eu&&eu.value)r.tags.cuisine=eu.value;if(em&&em.value)r.tags.method=em.value;if(ep&&ep.value)r.tags.protein=ep.value;closeRecipeDetail();renderRecipeGrid();saveRecipeApi(r).then(function(ok){if(ok!==true)alert('保存に失敗しました。\\n'+(typeof ok==='string'?ok:'ネットワーク接続を確認してください。'));});}window.saveTagEdit=saveTagEdit;
 function closeRecipeDetail(){document.getElementById('recipe-detail-overlay').classList.remove('open');}window.closeRecipeDetail=closeRecipeDetail;
-function deleteRecipe(id){if(!confirm('削除しますか？'))return;recipes=recipes.filter(function(r){return r.id!==id;});Object.keys(mealPlan).forEach(function(k){if(mealPlan[k]&&mealPlan[k].recipeIds){mealPlan[k].recipeIds=mealPlan[k].recipeIds.filter(function(rid){return rid!==id;});if(mealPlan[k].recipeIds.length===0)delete mealPlan[k];}});scheduleSave();renderRecipeGrid();renderGrid();renderCookList();}
+function deleteRecipe(id){if(!confirm('削除しますか？'))return;recipes=recipes.filter(function(r){return r.id!==id;});var mealPlanChanged=false;Object.keys(mealPlan).forEach(function(k){if(mealPlan[k]&&mealPlan[k].recipeIds){var before=mealPlan[k].recipeIds.length;mealPlan[k].recipeIds=mealPlan[k].recipeIds.filter(function(rid){return rid!==id;});if(mealPlan[k].recipeIds.length!==before)mealPlanChanged=true;if(mealPlan[k].recipeIds.length===0)delete mealPlan[k];}});renderRecipeGrid();renderGrid();renderCookList();deleteRecipeApi(id).then(function(ok){if(ok!==true)alert('削除に失敗しました。\\n'+(typeof ok==='string'?ok:'ネットワーク接続を確認してください。'));});if(mealPlanChanged)scheduleSave();}
 function exportRecipes(){var blob=new Blob([JSON.stringify(recipes,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='recipes_backup.json';a.click();URL.revokeObjectURL(url);}window.exportRecipes=exportRecipes;
 function setModalTagFilter(key,val,btn){modalTagFilters[key]=val;var group=btn.closest('.filter-tabs');if(group)group.querySelectorAll('.filter-tab').forEach(function(t){t.classList.remove('active');});btn.classList.add('active');filterModalRecipes();}window.setModalTagFilter=setModalTagFilter;
 function onModalTimeSlider(val){modalTimeMax=parseInt(val);document.getElementById('modal-time-label').textContent=modalTimeMax>=120?'制限なし':modalTimeMax+'分以内';filterModalRecipes();}window.onModalTimeSlider=onModalTimeSlider;
@@ -703,7 +745,7 @@ function filterModalRecipes(){
   }).join('');
 }
 function addRecipeToCell(rid){if(!currentModalKey)return;var data=getCellData(currentModalKey);if(!data.recipeIds.includes(rid))data.recipeIds.push(rid);scheduleSave();renderGrid();filterModalRecipes();}window.addRecipeToCell=addRecipeToCell;
-function quickAdd(){var name=document.getElementById('quick-name').value.trim();if(!name)return;var r={id:nextId++,name:name,type:document.getElementById('quick-type').value,servings:2,time:'',mode:'',ingredients:[],steps:[]};r.tags=guessTags(r);recipes.push(r);document.getElementById('quick-name').value='';scheduleSave();filterModalRecipes();renderRecipeGrid();}window.quickAdd=quickAdd;
+function quickAdd(){var name=document.getElementById('quick-name').value.trim();if(!name)return;var r={id:nextId++,name:name,type:document.getElementById('quick-type').value,servings:2,time:'',mode:'',ingredients:[],steps:[]};r.tags=guessTags(r);recipes.push(r);document.getElementById('quick-name').value='';filterModalRecipes();renderRecipeGrid();saveRecipeApi(r).then(function(ok){if(ok!==true)alert('保存に失敗しました。\\n'+(typeof ok==='string'?ok:'ネットワーク接続を確認してください。'));});}window.quickAdd=quickAdd;
 function showScreen(name,btn){document.querySelectorAll('.screen').forEach(function(s){s.classList.remove('active');});document.querySelectorAll('.nav-btn').forEach(function(b){b.classList.remove('active');});document.getElementById('screen-'+name).classList.add('active');if(btn)btn.classList.add('active');if(name==='cooking')renderCookList();}window.showScreen=showScreen;
 initWeekStart();loadShoppingList();renderRecipeGrid();
 })();`
