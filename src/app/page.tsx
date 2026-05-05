@@ -94,17 +94,28 @@ function guessTagsTS(recipe: any) {
 export default function Home() {
   const initialized = useRef(false)
   const nextIdRef = useRef(7)
-  const saveData = useCallback(async (recipes: Recipe[], mealPlan: MealPlan): Promise<boolean> => {
+  const saveData = useCallback(async (recipes: Recipe[], mealPlan: MealPlan): Promise<boolean | string> => {
     try {
+      const recipesBody = JSON.stringify(recipes)
+      const mealPlanBody = JSON.stringify(mealPlan)
+      const sizeKB = Math.round((recipesBody.length + mealPlanBody.length) / 1024)
       const [r1, r2] = await Promise.all([
-        fetch('/api/recipes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(recipes) }),
-        fetch('/api/mealplan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(mealPlan) }),
+        fetch('/api/recipes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: recipesBody }),
+        fetch('/api/mealplan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: mealPlanBody }),
       ])
-      if (!r1.ok || !r2.ok) throw new Error('save failed')
+      if (!r1.ok || !r2.ok) {
+        const errText = !r1.ok ? `recipes API ${r1.status}: ${await r1.text().catch(() => '')}` : `mealplan API ${r2.status}: ${await r2.text().catch(() => '')}`
+        console.error('save failed', errText, 'payload size:', sizeKB, 'KB')
+        return `${errText} (送信サイズ ${sizeKB}KB)`
+      }
       const el = document.getElementById('save-indicator')
       if (el) { el.textContent = '保存しました'; el.classList.add('show'); setTimeout(() => el.classList.remove('show'), 2000) }
       return true
-    } catch (e) { console.error('save failed', e); return false }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('save failed', e)
+      return `通信エラー: ${msg}`
+    }
   }, [])
 
   useEffect(() => {
@@ -598,7 +609,7 @@ function registerJson(){
   document.getElementById('json-input').value='';document.getElementById('json-preview').style.display='none';document.getElementById('json-register-btn').style.display='none';pendingJsonRecipes=[];
   renderRecipeGrid();
   flushSave().then(function(ok){
-    if(ok===false){alert('保存に失敗しました。ネットワーク接続を確認してください。');return;}
+    if(ok!==true){alert('保存に失敗しました。\\n'+(typeof ok==='string'?ok:'ネットワーク接続を確認してください。'));return;}
     alert(added.length+'件登録しました。\\n'+added.join('、'));
   });
 }window.registerJson=registerJson;
@@ -610,7 +621,7 @@ function manualAdd(){
   recipes.push(r);['m-name','m-ingredients','m-time','m-mode','m-steps'].forEach(function(id){document.getElementById(id).value='';});
   renderRecipeGrid();
   flushSave().then(function(ok){
-    if(ok===false)alert('保存に失敗しました。ネットワーク接続を確認してください。');
+    if(ok!==true)alert('保存に失敗しました。\\n'+(typeof ok==='string'?ok:'ネットワーク接続を確認してください。'));
     else alert('レシピを登録しました。');
   });
 }window.manualAdd=manualAdd;
