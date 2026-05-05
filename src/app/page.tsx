@@ -94,15 +94,17 @@ function guessTagsTS(recipe: any) {
 export default function Home() {
   const initialized = useRef(false)
   const nextIdRef = useRef(7)
-  const saveData = useCallback(async (recipes: Recipe[], mealPlan: MealPlan) => {
+  const saveData = useCallback(async (recipes: Recipe[], mealPlan: MealPlan): Promise<boolean> => {
     try {
-      await Promise.all([
+      const [r1, r2] = await Promise.all([
         fetch('/api/recipes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(recipes) }),
         fetch('/api/mealplan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(mealPlan) }),
       ])
+      if (!r1.ok || !r2.ok) throw new Error('save failed')
       const el = document.getElementById('save-indicator')
       if (el) { el.textContent = '保存しました'; el.classList.add('show'); setTimeout(() => el.classList.remove('show'), 2000) }
-    } catch { console.error('save failed') }
+      return true
+    } catch (e) { console.error('save failed', e); return false }
   }, [])
 
   useEffect(() => {
@@ -355,6 +357,7 @@ var CMAP=${JSON.stringify(cmap)};
 var tagFilters={type:'all',course:'all',cuisine:'all',method:'all',protein:'all'},timeFilterMax=120;
 var modalTagFilters={type:'all',course:'all',cuisine:'all',method:'all',protein:'all'},modalTimeMax=120;
 function scheduleSave(){if(window._st)clearTimeout(window._st);window._st=setTimeout(function(){if(window.saveDataFn)window.saveDataFn(recipes,mealPlan);},1000);}
+function flushSave(){if(window._st){clearTimeout(window._st);window._st=null;}if(window.saveDataFn)return window.saveDataFn(recipes,mealPlan);return Promise.resolve(false);}
 function saveShoppingList(){try{localStorage.setItem('mps',JSON.stringify(shoppingList));}catch(e){}}
 function loadShoppingList(){try{var s=localStorage.getItem('mps');if(s){shoppingList=JSON.parse(s);if(shoppingList.length>0)renderShoppingList();}}catch(e){}}
 function toDateKey(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
@@ -593,7 +596,11 @@ function registerJson(){
   });
   if(!added.length){alert('すべて登録済みのレシピでした。');return;}
   document.getElementById('json-input').value='';document.getElementById('json-preview').style.display='none';document.getElementById('json-register-btn').style.display='none';pendingJsonRecipes=[];
-  scheduleSave();renderRecipeGrid();alert(added.length+'件登録しました。\\n'+added.join('、'));
+  renderRecipeGrid();
+  flushSave().then(function(ok){
+    if(ok===false){alert('保存に失敗しました。ネットワーク接続を確認してください。');return;}
+    alert(added.length+'件登録しました。\\n'+added.join('、'));
+  });
 }window.registerJson=registerJson;
 function manualAdd(){
   var name=document.getElementById('m-name').value.trim();if(!name)return;
@@ -601,7 +608,11 @@ function manualAdd(){
   var r={id:nextId++,name:name,type:document.getElementById('m-type').value,servings:parseInt(document.getElementById('m-servings').value),time:document.getElementById('m-time').value.trim(),mode:document.getElementById('m-mode').value.trim(),ingredients:ing?ing.split(/[,、]/).map(function(s){return s.trim();}).filter(Boolean):[],steps:sr?sr.split('\\n').map(function(s){return s.trim();}).filter(Boolean):[],tags:{course:document.getElementById('m-course').value||null,cuisine:document.getElementById('m-cuisine').value||null,method:document.getElementById('m-method').value||null,protein:document.getElementById('m-protein').value||null}};
   var g=guessTags(r);if(!r.tags.course)r.tags.course=g.course;if(!r.tags.cuisine)r.tags.cuisine=g.cuisine;if(!r.tags.method)r.tags.method=g.method;if(!r.tags.protein)r.tags.protein=g.protein;
   recipes.push(r);['m-name','m-ingredients','m-time','m-mode','m-steps'].forEach(function(id){document.getElementById(id).value='';});
-  scheduleSave();renderRecipeGrid();alert('レシピを登録しました。');
+  renderRecipeGrid();
+  flushSave().then(function(ok){
+    if(ok===false)alert('保存に失敗しました。ネットワーク接続を確認してください。');
+    else alert('レシピを登録しました。');
+  });
 }window.manualAdd=manualAdd;
 function setTagFilter(key,val,btn){tagFilters[key]=val;var group=btn.closest('.filter-tabs');if(group)group.querySelectorAll('.filter-tab').forEach(function(t){t.classList.remove('active');});btn.classList.add('active');renderRecipeGrid();}window.setTagFilter=setTagFilter;
 function onTimeSlider(val){timeFilterMax=parseInt(val);document.getElementById('time-slider-label').textContent=timeFilterMax>=120?'制限なし':timeFilterMax+'分以内';renderRecipeGrid();}window.onTimeSlider=onTimeSlider;
