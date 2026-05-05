@@ -330,7 +330,10 @@ function injectApp(initialRecipes: Recipe[], initialMealPlan: MealPlan, cmap: Re
     </div>
     <div class="recipes-topbar">
       <span style="font-size:12px;color:#888;" id="recipe-count"></span>
-      <button class="btn-secondary btn-sm" onclick="exportRecipes()">JSONエクスポート</button>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <button class="btn-secondary btn-sm" onclick="dedupeRecipes()">重複を削除</button>
+        <button class="btn-secondary btn-sm" onclick="exportRecipes()">JSONエクスポート</button>
+      </div>
     </div>
     <div class="recipe-filters">
       <div class="filter-row"><span class="filter-row-label">種別</span><div class="filter-tabs" id="ft-type"><button class="filter-tab active" onclick="setTagFilter('type','all',this)">すべて</button><button class="filter-tab" onclick="setTagFilter('type','healsio',this)">ヘルシオ</button><button class="filter-tab" onclick="setTagFilter('type','normal',this)">通常</button></div></div>
@@ -709,6 +712,26 @@ function saveTagEdit(id){var r=recipes.find(function(r){return r.id===id;});if(!
 function closeRecipeDetail(){document.getElementById('recipe-detail-overlay').classList.remove('open');}window.closeRecipeDetail=closeRecipeDetail;
 function deleteRecipe(id){var rec=recipes.find(function(r){return r.id===id;});var nm=rec?rec.name:'このレシピ';if(!confirm(nm+'を削除しますか？'))return;recipes=recipes.filter(function(r){return r.id!==id;});var mealPlanChanged=false;Object.keys(mealPlan).forEach(function(k){if(mealPlan[k]&&mealPlan[k].recipeIds){var before=mealPlan[k].recipeIds.length;mealPlan[k].recipeIds=mealPlan[k].recipeIds.filter(function(rid){return rid!==id;});if(mealPlan[k].recipeIds.length!==before)mealPlanChanged=true;if(mealPlan[k].recipeIds.length===0)delete mealPlan[k];}});renderRecipeGrid();renderGrid();renderCookList();deleteRecipeApi(id).then(function(ok){if(ok!==true)alert('削除に失敗しました。\\n'+(typeof ok==='string'?ok:'ネットワーク接続を確認してください。'));});if(mealPlanChanged)scheduleSave();}window.deleteRecipe=deleteRecipe;
 function exportRecipes(){var blob=new Blob([JSON.stringify(recipes,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='recipes_backup.json';a.click();URL.revokeObjectURL(url);}window.exportRecipes=exportRecipes;
+function dedupeRecipes(){
+  fetch('/api/recipes/dedupe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dryRun:true})}).then(function(r){return r.json();}).then(function(preview){
+    if(preview.error){alert('プレビューに失敗しました：'+preview.error);return;}
+    if(!preview.deletedCount){alert('重複しているレシピはありませんでした。');return;}
+    var names=preview.deleted.map(function(d){return d.name;}).filter(function(v,i,a){return a.indexOf(v)===i;});
+    var msg='次のレシピで重複を検出しました（合計'+preview.deletedCount+'件削除）：\\n\\n'+names.slice(0,15).join('\\n')+(names.length>15?'\\n…ほか'+(names.length-15)+'件':'')+'\\n\\n各名前で1件だけ残し、残りを削除します。よろしいですか？';
+    if(!confirm(msg))return;
+    fetch('/api/recipes/dedupe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dryRun:false})}).then(function(r){return r.json();}).then(function(result){
+      if(result.error){alert('削除に失敗しました：'+result.error);return;}
+      // delete from local arrays + clean up mealplan references
+      var delIds={};result.deleted.forEach(function(d){delIds[d.id]=true;});
+      recipes=recipes.filter(function(r){return !delIds[r.id];});
+      var mealPlanChanged=false;
+      Object.keys(mealPlan).forEach(function(k){if(mealPlan[k]&&mealPlan[k].recipeIds){var before=mealPlan[k].recipeIds.length;mealPlan[k].recipeIds=mealPlan[k].recipeIds.filter(function(rid){return !delIds[rid];});if(mealPlan[k].recipeIds.length!==before)mealPlanChanged=true;if(mealPlan[k].recipeIds.length===0)delete mealPlan[k];}});
+      if(mealPlanChanged)scheduleSave();
+      renderRecipeGrid();renderGrid();renderCookList();
+      alert(result.deletedCount+'件の重複を削除しました。');
+    }).catch(function(e){alert('削除に失敗しました：'+e.message);});
+  }).catch(function(e){alert('プレビューに失敗しました：'+e.message);});
+}window.dedupeRecipes=dedupeRecipes;
 function setModalTagFilter(key,val,btn){modalTagFilters[key]=val;var group=btn.closest('.filter-tabs');if(group)group.querySelectorAll('.filter-tab').forEach(function(t){t.classList.remove('active');});btn.classList.add('active');filterModalRecipes();}window.setModalTagFilter=setModalTagFilter;
 function onModalTimeSlider(val){modalTimeMax=parseInt(val);document.getElementById('modal-time-label').textContent=modalTimeMax>=120?'制限なし':modalTimeMax+'分以内';filterModalRecipes();}window.onModalTimeSlider=onModalTimeSlider;
 function resetModalTime(){modalTimeMax=120;document.getElementById('modal-time-slider').value=120;document.getElementById('modal-time-label').textContent='制限なし';filterModalRecipes();}window.resetModalTime=resetModalTime;
