@@ -68,12 +68,36 @@ async function getAllIds(): Promise<number[]> {
   return ids
 }
 
+async function fetchRecipesByIds(ids: number[]): Promise<Recipe[]> {
+  // Chunk to keep each Upstash response under size limits when recipes carry large base64 images.
+  const CHUNK = 10
+  const out: Recipe[] = []
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const slice = ids.slice(i, i + CHUNK)
+    const keys = slice.map(RECIPE_KEY)
+    try {
+      const values = await redis.mget<(Recipe | null)[]>(...keys)
+      for (const v of values) if (v) out.push(v)
+    } catch (e) {
+      console.error('mget chunk failed', { from: i, to: i + slice.length, err: e instanceof Error ? e.message : String(e) })
+      // Fall back to per-key get so one bad/oversized recipe doesn't kill the whole batch
+      for (const id of slice) {
+        try {
+          const r = await redis.get<Recipe>(RECIPE_KEY(id))
+          if (r) out.push(r)
+        } catch (e2) {
+          console.error('get single recipe failed', { id, err: e2 instanceof Error ? e2.message : String(e2) })
+        }
+      }
+    }
+  }
+  return out
+}
+
 async function loadAllRecipes(): Promise<Recipe[]> {
   const ids = await getAllIds()
   if (ids.length > 0) {
-    const keys = ids.map(RECIPE_KEY)
-    const values = await redis.mget<(Recipe | null)[]>(...keys)
-    return values.filter((r): r is Recipe => !!r)
+    return await fetchRecipesByIds(ids)
   }
   // migration from legacy single-key (whole array under one key)
   const legacy = await redis.get<Recipe[]>(LEGACY_RECIPES_KEY)
