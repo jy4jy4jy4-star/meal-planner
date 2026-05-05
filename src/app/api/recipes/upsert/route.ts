@@ -16,12 +16,10 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'invalid recipe' }, { status: 400 })
     }
 
-    const ids = (await redis.get<number[]>(IDS_KEY)) ?? []
-    const nextIds = ids.includes(recipe.id) ? ids : [...ids, recipe.id]
-
+    // Use Redis Set so concurrent upserts cannot lose IDs (SADD is atomic).
     const pipeline = redis.pipeline()
     pipeline.set(RECIPE_KEY(recipe.id), recipe)
-    pipeline.set(IDS_KEY, nextIds)
+    pipeline.sadd(IDS_KEY, String(recipe.id))
     await pipeline.exec()
 
     return NextResponse.json({ ok: true, id: recipe.id })

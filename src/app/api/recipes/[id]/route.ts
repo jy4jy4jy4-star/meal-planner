@@ -13,12 +13,9 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
       return NextResponse.json({ error: 'invalid id' }, { status: 400 })
     }
 
-    const ids = (await redis.get<number[]>(IDS_KEY)) ?? []
-    const nextIds = ids.filter((i) => i !== id)
-
     const pipeline = redis.pipeline()
     pipeline.del(RECIPE_KEY(id))
-    pipeline.set(IDS_KEY, nextIds)
+    pipeline.srem(IDS_KEY, String(id))
     await pipeline.exec()
 
     return NextResponse.json({ ok: true })
