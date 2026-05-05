@@ -7,29 +7,65 @@ const LEGACY_RECIPES_KEY = 'meal-planner:recipes'
 const IDS_KEY = 'meal-planner:recipe-ids'
 const RECIPE_KEY = (id: number) => `meal-planner:recipe:${id}`
 
+async function scanRecipeIds(): Promise<number[]> {
+  const ids: number[] = []
+  const prefix = 'meal-planner:recipe:'
+  let cursor: string | number = 0
+  let safety = 0
+  do {
+    const result: [string | number, string[]] = await redis.scan(cursor as number, { match: prefix + '*', count: 200 })
+    cursor = result[0]
+    for (const key of result[1]) {
+      const id = Number(key.slice(prefix.length))
+      if (Number.isFinite(id)) ids.push(id)
+    }
+    safety++
+    if (safety > 50) break
+  } while (cursor !== 0 && cursor !== '0')
+  return ids
+}
+
 async function getAllIds(): Promise<number[]> {
-  // Try as Set first (current format)
+  let ids: number[] = []
+  // Current format: Redis Set
   try {
     const members = await redis.smembers(IDS_KEY)
     if (members && members.length > 0) {
-      return members.map((m) => Number(m)).filter((n) => Number.isFinite(n))
+      ids = members.map((m) => Number(m)).filter((n) => Number.isFinite(n))
     }
   } catch {
-    // key may exist as a different type from older deploys — fall through to migration
+    // WRONGTYPE — IDS_KEY exists as a string from older deploys
   }
-  // Migrate from older array-string format if present
+  // Older format: JSON-array string under same key
+  if (ids.length === 0) {
+    try {
+      const arr = await redis.get<number[]>(IDS_KEY)
+      if (arr && Array.isArray(arr) && arr.length > 0) {
+        await redis.del(IDS_KEY)
+        const [first, ...rest] = arr.map(String)
+        await redis.sadd(IDS_KEY, first, ...rest)
+        ids = arr
+      }
+    } catch {
+      // ignore
+    }
+  }
+  // Defensive recovery: scan for orphaned recipe:* keys not present in the index.
+  // Concurrent upserts in older deploys could save the recipe value but lose the
+  // ID from the JSON-array index due to read-modify-write races.
   try {
-    const arr = await redis.get<number[]>(IDS_KEY)
-    if (arr && Array.isArray(arr) && arr.length > 0) {
-      await redis.del(IDS_KEY)
-      const [first, ...rest] = arr.map(String)
+    const scanned = await scanRecipeIds()
+    const known = new Set(ids)
+    const missing = scanned.filter((id) => !known.has(id))
+    if (missing.length > 0) {
+      const [first, ...rest] = missing.map(String)
       await redis.sadd(IDS_KEY, first, ...rest)
-      return arr
+      ids = [...ids, ...missing]
     }
-  } catch {
-    // ignore
+  } catch (e) {
+    console.error('scan recovery failed', e)
   }
-  return []
+  return ids
 }
 
 async function loadAllRecipes(): Promise<Recipe[]> {
